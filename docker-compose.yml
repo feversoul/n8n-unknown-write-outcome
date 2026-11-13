@@ -1,0 +1,49 @@
+# n8n with the three workflows already imported, and the lost-ack fixture as
+# the API they write to, to try the scenarios locally.
+#   cp .env.example .env   (fill it in)   then   docker compose up -d
+# Already have n8n (Cloud or your own)? You do not need this file: see
+# "Add it to your n8n" in the README.
+
+services:
+  n8n:
+    image: ${N8N_IMAGE:-n8nio/n8n:2.47.7}
+    restart: unless-stopped
+    entrypoint: ["sh", "/bootstrap/bootstrap.sh"]
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
+      # Sent as the header X-Workflow-Key on every webhook call.
+      WORKFLOW_KEY: ${WORKFLOW_KEY:?set WORKFLOW_KEY in .env}
+      # Empty: the workflows keep their defaults (fixture, 60/300/900 s rechecks).
+      API_BASE: ${API_BASE:-}
+      ALERT_URL: ${ALERT_URL:-}
+      WRITE_TIMEOUT_MS: ${WRITE_TIMEOUT_MS:-}
+      RECHECK_AFTER_SECONDS: ${RECHECK_AFTER_SECONDS:-}
+      REVIEW_RECHECK_SECONDS: ${REVIEW_RECHECK_SECONDS:-}
+      LEASE_SECONDS: ${LEASE_SECONDS:-}
+      SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/bootstrap/workflows:ro
+      - ./docker/bootstrap.sh:/bootstrap/bootstrap.sh:ro
+      - ./docker/prepare.mjs:/bootstrap/prepare.mjs:ro
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+
+  # The lost-ack fixture (third-party, MIT, see third_party/), unmodified,
+  # behind a small host file that puts it on this network. Two instances:
+  # /lag2/... hides a record for 2 lookups, /lag5/... for 5.
+  #   GET /lag2/<scenario>/report?ref=demo-...   what really happened
+  #   GET /alerts                                 alerts the Check workflow sent
+  fixture:
+    image: node:22-alpine
+    restart: unless-stopped
+    command: ["node", "/app/fixture-host.mjs"]
+    read_only: true
+    volumes:
+      - ./docker/fixture-host.mjs:/app/fixture-host.mjs:ro
+      - ./third_party/lost-ack-fixture:/fixture:ro
+    ports:
+      - "${FIXTURE_PORT:-8080}:8080"
+
+volumes:
+  n8n_data:

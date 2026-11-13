@@ -1,0 +1,1331 @@
+{
+  "name": "Unknown Write · 2 Check",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Unknown Write · Check\nRuns every minute and works through the rows that are still open. All state is in the data table, so nothing is lost when n8n restarts, and no execution sits in a Wait node.\n\nFor each open job that is due:\n1. **Look it up** by the reference. Exactly one record with an id: `done`. Anything else (404, an empty or odd 200, an error) is **no evidence** and changes nothing.\n2. No evidence, job not yet with a person: **ask for a receipt**. Only a receipt that names this reference and this attempt, is terminal and says `not_applied` allows one more write. The resend is claimed in the row first.\n3. Otherwise count the check. After the last entry of `RECHECK_AFTER_SECONDS` the job goes to `review` and an alert is sent.\n4. Jobs in `review` are still looked up, every `REVIEW_RECHECK_SECONDS`. If the record shows up late, the job is closed and a second alert says so. A job in `review` is never written again by this workflow.\n\nSettings are at the top of **Settings**. Replace **Look it up** and **Ask for a receipt** with your own requests and adapt the two **Judge** nodes to what your API returns. No receipt endpoint: set `USE_RECEIPT` to false and nothing is ever sent twice.",
+        "width": 760,
+        "height": 500,
+        "color": 4
+      },
+      "id": "63f0ce79-4266-4329-8de0-0d9143d83cf1",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -680
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "2fefa131-9a84-47cd-8b96-52854115ca51",
+      "name": "Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "unknown-write/sweep",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "9c2ff35c-6b47-43cf-8cf0-bd180273de63",
+      "name": "Or call",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        100
+      ],
+      "webhookId": "6280c340-df19-455a-8ea7-d046ee41f755",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "unknownWriteKey",
+          "name": "Unknown Write Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Settings.\nconst RECHECK_AFTER_SECONDS = [60, 300, 900]; // wait before lookup 1, 2, 3. Still nothing after the last one: review. Set the total above the slowest settle time you measured.\nconst REVIEW_RECHECK_SECONDS = 1800; // how often a job in review is looked up again\nconst USE_RECEIPT = true; // false if your API has no authoritative \"this write was not applied\" answer\nconst LEASE_SECONDS = 300; // a row still \"sending\" after this long belongs to a run that died; it is treated as unknown\nconst MAX_PER_SWEEP = 50; // jobs handled per run\nconst ALERT_URL = ''; // where the two alerts are posted as JSON (Slack workflow, another webhook). Empty: no alert, the rows still say it.\n\nreturn [{ json: {\n  recheck_after_seconds: RECHECK_AFTER_SECONDS,\n  review_recheck_seconds: REVIEW_RECHECK_SECONDS,\n  use_receipt: USE_RECEIPT,\n  lease_seconds: LEASE_SECONDS,\n  max_per_sweep: MAX_PER_SWEEP,\n  alert_url: ALERT_URL,\n} }];"
+      },
+      "id": "c11d3a03-9324-4019-8e98-2acf772612ad",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "anyCondition",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "unknown"
+            },
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "review"
+            },
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "sending"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "06a2853c-6709-4ed1-8c3e-f105b3f0f965",
+      "name": "Open jobs",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const settings = $('Settings').first().json;\nconst now = Date.now();\nconst due = [];\nfor (const { json: row } of $input.all()) {\n  if (row.id === undefined) continue;\n  let status = row.status;\n  if (status === 'sending') {\n    // A run is in the middle of the write. If it has been that way for too\n    // long the run died, and whether the write went out is unknown.\n    if (now - new Date(row.updatedAt).getTime() < settings.lease_seconds * 1000) continue;\n    status = 'unknown';\n  }\n  const checks = row.checks ?? 0;\n  const waits = settings.recheck_after_seconds;\n  const wait = status === 'review' ? settings.review_recheck_seconds : waits[Math.min(checks, waits.length - 1)];\n  if (now < (row.last_check_at ?? 0) + wait * 1000) continue;\n  // status_was: what the row said when it was read. Later updates only apply if it still says so.\n  due.push({ json: { ...row, status, status_was: row.status } });\n}\ndue.sort((a, b) => (a.json.last_check_at ?? 0) - (b.json.last_check_at ?? 0));\nreturn due.slice(0, settings.max_per_sweep);"
+      },
+      "id": "4ab6719c-ec33-4607-889f-f19d9f22c525",
+      "name": "Due now",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://fixture:8080/' + $json.target + '/lookup?ref=' + encodeURIComponent($json.reference) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "e7c91fe4-114b-47be-8feb-e2a0e544f304",
+      "name": "Look it up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pairs every answer with its job and says what the answer proves.\n// Only a positive match is evidence. Adapt `records` to your API.\nconst jobs = $('Due now').all();\nconst short = (value) => { try { return JSON.stringify(value).slice(0, 120); } catch { return String(value).slice(0, 120); } };\nreturn $input.all().map((item, index) => {\n  const job = jobs[index].json;\n  const answer = item.json;\n  const body = answer.body;\n  // A record counts when the answer is a 200, carries a list, does not say exists: false (or anything odd in that field), and the record has an id.\n  const ok = answer.statusCode === 200 && body && typeof body === \"object\" && (body.exists === undefined || body.exists === true) && Array.isArray(body.records);\n  const records = ok ? body.records.filter((record) => record && typeof record.id === \"string\" && record.id !== \"\") : [];\n  const verdict = records.length === 1 ? 'found' : records.length > 1 ? 'several' : 'no_evidence';\n  const saw = answer.statusCode === undefined ? 'no answer' : `${answer.statusCode} ${short(body)}`;\n  const now = new Date();\n  const parse = (text) => { try { return JSON.parse(text); } catch { return []; } };\n  const history = [...parse(job.history), { at: now.toISOString(), step: 'lookup', attempt: job.attempt, saw, verdict }].slice(-40);\n  return { json: {\n    job,\n    verdict,\n    id: job.id,\n    status_was: job.status_was,\n    checks: (job.checks ?? 0) + 1,\n    last_check_at: now.getTime(),\n    now: now.toISOString(),\n    entries: history,\n    history: JSON.stringify(history),\n    // for \"Close as done\"\n    status: 'done',\n    remote_id: records[0]?.id ?? '',\n    first_seen_at: job.first_seen_at || now.toISOString(),\n    resolution: job.status === 'review' ? 'arrived_after_cutoff' : job.attempt > 1 ? 'resent_after_receipt' : 'confirmed_by_lookup',\n  } };\n});"
+      },
+      "id": "7167d054-2896-4baa-8d54-79f14dcc9c14",
+      "name": "Judge the lookup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4898c06f-e36e-41bb-8dd7-397e58576c8f",
+              "leftValue": "={{ $json.verdict === 'found' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "7bab908c-6909-4bd7-88e7-982407d5fa2a",
+      "name": "Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "remote_id": "={{ $json.remote_id }}",
+            "first_seen_at": "={{ $json.first_seen_at }}",
+            "resolution": "={{ $json.resolution }}",
+            "checks": "={{ $json.checks }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "history": "={{ $json.history }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "checks",
+              "displayName": "checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "first_seen_at",
+              "displayName": "first_seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "remote_id",
+              "displayName": "remote_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolution",
+              "displayName": "resolution",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "ff03c78c-96a8-4098-835f-8e10ff69279f",
+      "name": "Close as done",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1560,
+        -160
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "20a1c265-ea92-40e4-8e15-3102391ce5a5",
+              "leftValue": "={{ $json.verdict === 'no_evidence' && $json.job.status === 'unknown' && $('Settings').first().json.use_receipt }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "7fa1eb76-f42f-4b8b-8f0f-34a34a941867",
+      "name": "Receipt worth asking?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1560,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://fixture:8080/' + $json.job.target + '/receipt?ref=' + encodeURIComponent($json.job.reference) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "e4b9a318-2da9-4a11-8645-9504340a1b77",
+      "name": "Ask for a receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        20
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// A receipt allows one more write only if all of this holds: it is for\n// this reference, for the attempt the row is on, terminal, and says the\n// write was not applied. A receipt for an earlier attempt allows nothing.\nconst asked = $('Receipt worth asking?').all(0);\nreturn $input.all().map((item, index) => {\n  const state = asked[index].json;\n  const job = state.job;\n  const answer = item.json;\n  const body = answer.body;\n  const proof = answer.statusCode === 200 && body && typeof body === \"object\"\n    && body.ref === job.reference && body.attempt === job.attempt && body.terminal === true && body.outcome === \"not_applied\";\n  const saw = answer.statusCode === undefined ? 'no answer' : `${answer.statusCode} ${JSON.stringify(body ?? null).slice(0, 120)}`;\n  const entries = [...state.entries, { at: state.now, step: 'receipt', attempt: job.attempt, saw, verdict: proof ? 'not_applied' : 'no_evidence' }];\n  if (proof) entries.push({ at: state.now, step: 'write', attempt: job.attempt + 1, saw: 'claimed' });\n  return { json: {\n    ...state,\n    proof,\n    entries,\n    history: JSON.stringify(entries.slice(-40)),\n    // for \"Claim the resend\"\n    attempt: job.attempt,\n    next_attempt: job.attempt + 1,\n    claimed_by: `${$execution.id}-${job.id}`,\n  } };\n});"
+      },
+      "id": "d41936f8-5e32-4652-8d74-90ec264ce3ea",
+      "name": "Judge the receipt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d73734ef-fd9a-49cf-87d8-f01f6a43efb9",
+              "leftValue": "={{ $json.proof === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "fcb5cdae-3c23-4d33-8a73-7f61a58e3ded",
+      "name": "Proof it was not applied?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2240,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            },
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "={{ $json.status_was }}"
+            },
+            {
+              "keyName": "attempt",
+              "condition": "eq",
+              "keyValue": "={{ $json.attempt }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "sending",
+            "attempt": "={{ $json.next_attempt }}",
+            "claimed_by": "={{ $json.claimed_by }}",
+            "checks": "={{ $json.checks }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "history": "={{ $json.history }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attempt",
+              "displayName": "attempt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "checks",
+              "displayName": "checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "claimed_by",
+              "displayName": "claimed_by",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "38592c39-83e6-4ff1-8fee-5de4d2aff1a3",
+      "name": "Claim the resend",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2480,
+        -80
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "04285499-7cf6-4a7e-83f6-d133f241962a",
+              "leftValue": "={{ $json.id !== undefined && $json.status === 'sending' && $json.claimed_by === $execution.id + '-' + $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "9948a5a2-bc50-4781-807d-fc4b9872e86c",
+      "name": "Resend mine?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2700,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://fixture:8080/' + $json.target + '/write?ref=' + encodeURIComponent($json.reference) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "2b2430ad-d794-41ae-840b-54708fbc0772",
+      "name": "Send the write again",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2920,
+        -160
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// What the answer to a write means. Adapt it to your API.\nfunction readWrite(answer) {\n  const code = answer.statusCode;\n  if (code === undefined) return { status: 'unknown', saw: 'no answer: ' + String(answer.error?.message ?? answer.error ?? 'connection lost').slice(0, 160) };\n  if (code >= 200 && code < 300) return { status: 'done', saw: String(code), remote_id: String(answer.body?.id ?? '') };\n  // The API answered and refused. 408 is a timeout said out loud, so it stays unknown.\n  if (code >= 400 && code < 500 && code !== 408) return { status: 'rejected', saw: String(code) };\n  return { status: 'unknown', saw: String(code) };\n}\n\nconst rows = $('Resend mine?').all(0);\nreturn $input.all().map((item, index) => {\n  const row = rows[index].json;\n  const result = readWrite(item.json);\n  const now = new Date();\n  const parse = (text) => { try { return JSON.parse(text); } catch { return []; } };\n  const history = parse(row.history);\n  const last = history[history.length - 1];\n  if (last && last.step === 'write' && last.saw === 'claimed') last.saw = result.saw;\n  return { json: {\n    id: row.id,\n    status: result.status,\n    remote_id: result.remote_id ?? '',\n    resolution: result.status === 'done' ? 'resent_after_receipt' : result.status === 'rejected' ? 'refused_' + result.saw : '',\n    first_seen_at: result.status === 'done' ? now.toISOString() : '',\n    // A new attempt gets the full recheck window again.\n    checks: 0,\n    last_check_at: now.getTime(),\n    history: JSON.stringify(history),\n  } };\n});"
+      },
+      "id": "602fb2db-9b58-4baf-8929-e8af39bf7257",
+      "name": "Read the resend answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3140,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "remote_id": "={{ $json.remote_id }}",
+            "resolution": "={{ $json.resolution }}",
+            "first_seen_at": "={{ $json.first_seen_at }}",
+            "checks": "={{ $json.checks }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "history": "={{ $json.history }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "checks",
+              "displayName": "checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "first_seen_at",
+              "displayName": "first_seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "remote_id",
+              "displayName": "remote_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolution",
+              "displayName": "resolution",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "bb78912f-dd60-4fd0-8113-06d45f6d8e58",
+      "name": "Save the resend outcome",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3360,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const waits = $('Settings').first().json.recheck_after_seconds;\nreturn $input.all().map((item) => {\n  const state = item.json;\n  const job = state.job;\n  // Several records under one reference: someone or something wrote twice. A person has to look.\n  const several = state.verdict === 'several';\n  const handover = job.status === 'unknown' && (several || state.checks >= waits.length);\n  return { json: {\n    id: state.id,\n    status_was: state.status_was,\n    handover,\n    status: handover ? 'review' : job.status,\n    review_at: handover ? state.now : job.review_at ?? '',\n    resolution: several ? 'several_records' : job.resolution ?? '',\n    checks: state.checks,\n    last_check_at: state.last_check_at,\n    history: state.history,\n  } };\n});"
+      },
+      "id": "0ce93b71-6dd9-4bee-8438-31c10eb07c3b",
+      "name": "Count the check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2480,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b493fb8e-1409-434c-8587-8c45dd6eab50",
+              "leftValue": "={{ $json.handover === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "89ac034c-24f9-43fc-8c09-cd1f51d77355",
+      "name": "Past the cutoff?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2700,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            },
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "={{ $json.status_was }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "review_at": "={{ $json.review_at }}",
+            "resolution": "={{ $json.resolution }}",
+            "checks": "={{ $json.checks }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "history": "={{ $json.history }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "checks",
+              "displayName": "checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_at",
+              "displayName": "review_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolution",
+              "displayName": "resolution",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "1379442d-9411-4cc5-8fce-00c17818d94e",
+      "name": "Hand to review",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2920,
+        140
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            },
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "={{ $json.status_was }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "review_at": "={{ $json.review_at }}",
+            "resolution": "={{ $json.resolution }}",
+            "checks": "={{ $json.checks }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "history": "={{ $json.history }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "checks",
+              "displayName": "checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_at",
+              "displayName": "review_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolution",
+              "displayName": "resolution",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "45925076-8b46-46c5-8cd9-55db85f8049a",
+      "name": "Keep waiting",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2920,
+        340
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const url = $('Settings').first().json.alert_url;\nconst parse = (text, fallback) => { try { return JSON.parse(text); } catch { return fallback; } };\nconst alerts = [];\nfor (const { json: row } of $input.all()) {\n  if (row.id === undefined) continue;\n  let event;\n  if (row.status === 'review') event = 'needs_review';\n  else if (row.status === 'done' && row.resolution === 'arrived_after_cutoff') event = 'resolved_itself';\n  else continue;\n  alerts.push({ json: {\n    alert_url: url,\n    event,\n    text: event === 'needs_review'\n      ? `Write ${row.reference}: outcome still unknown after ${row.checks} lookups. Search the target system for this reference before creating anything by hand.`\n      : `Write ${row.reference}: the record showed up (${row.remote_id}). No action needed, do not enter it again.`,\n    reference: row.reference,\n    target: row.target,\n    payload: parse(row.payload, {}),\n    attempt: row.attempt,\n    sent_at: row.sent_at,\n    review_at: row.review_at,\n    remote_id: row.remote_id ?? \"\",\n    resolution: row.resolution ?? \"\",\n    history: parse(row.history, []),\n  } });\n}\nreturn alerts;"
+      },
+      "id": "7c596286-f40c-4c1b-8c53-92751d3f21d5",
+      "name": "Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "82c1e97d-86a0-484b-8639-7da012cf3347",
+              "leftValue": "={{ typeof $json.alert_url === 'string' && $json.alert_url !== '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "e3d4da58-7802-46fc-8f26-7769bd4b390a",
+      "name": "Alert address set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3580,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.alert_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "3a0203e6-8f3d-4e35-8bb8-95a72ee889da",
+      "name": "Send the alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3800,
+        60
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Or call": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Open jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open jobs": {
+      "main": [
+        [
+          {
+            "node": "Due now",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Due now": {
+      "main": [
+        [
+          {
+            "node": "Look it up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Look it up": {
+      "main": [
+        [
+          {
+            "node": "Judge the lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Judge the lookup": {
+      "main": [
+        [
+          {
+            "node": "Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Found?": {
+      "main": [
+        [
+          {
+            "node": "Close as done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Receipt worth asking?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Receipt worth asking?": {
+      "main": [
+        [
+          {
+            "node": "Ask for a receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Count the check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask for a receipt": {
+      "main": [
+        [
+          {
+            "node": "Judge the receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Judge the receipt": {
+      "main": [
+        [
+          {
+            "node": "Proof it was not applied?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proof it was not applied?": {
+      "main": [
+        [
+          {
+            "node": "Claim the resend",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Count the check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim the resend": {
+      "main": [
+        [
+          {
+            "node": "Resend mine?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend mine?": {
+      "main": [
+        [
+          {
+            "node": "Send the write again",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the write again": {
+      "main": [
+        [
+          {
+            "node": "Read the resend answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the resend answer": {
+      "main": [
+        [
+          {
+            "node": "Save the resend outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count the check": {
+      "main": [
+        [
+          {
+            "node": "Past the cutoff?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Past the cutoff?": {
+      "main": [
+        [
+          {
+            "node": "Hand to review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Keep waiting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close as done": {
+      "main": [
+        [
+          {
+            "node": "Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hand to review": {
+      "main": [
+        [
+          {
+            "node": "Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert": {
+      "main": [
+        [
+          {
+            "node": "Alert address set?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert address set?": {
+      "main": [
+        [
+          {
+            "node": "Send the alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "unknownWriteCheck1"
+}

@@ -1,0 +1,800 @@
+{
+  "name": "Unknown Write · 1 Write",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Unknown Write · Write\nSends one write to an API that has no idempotency key, **once**, and writes down what is known about it.\n\nCall it with `{ reference, target, payload }` from an **Execute Sub-workflow** node or over the webhook (`POST unknown-write/submit`). `reference` is your own id for this write. It must reach the API in a field the lookup can search by.\n\n- The row is written **before** the write goes out. A reference that already has a row is answered from the row and nothing is sent.\n- A 2xx answer: `done`. A 4xx answer: `rejected`. No answer, a timeout or a 5xx: `unknown`.\n- `unknown` is where this workflow stops. It never sends again. **Unknown Write · 2 Check** takes over from the table.\n\nReplace **Send the write** with your own request. Keep **Retry On Fail** off and **On Error** on *Continue*. Adapt `readWrite` in **Read the answer** if your API answers differently.\n\n`GET unknown-write/jobs?reference=...` or `?status=review` shows the rows.",
+        "width": 700,
+        "height": 500,
+        "color": 4
+      },
+      "id": "776c323a-101d-49bf-8a24-e265f4eb4b9c",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -640
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "98936658-055a-441f-8a78-29a592835c6a",
+      "name": "When called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "unknown-write/submit",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "b5ebb2fd-d4df-4e8a-849a-7dae86ef8348",
+      "name": "Submit",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        100
+      ],
+      "webhookId": "67445599-50d6-4ceb-8ef6-2e31a0924757",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "unknownWriteKey",
+          "name": "Unknown Write Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n// Over the webhook the job is the request body; from a sub-workflow call it is the item.\nconst job = input.webhookUrl && input.body ? input.body : input;\nconst reference = String(job.reference ?? '').trim();\nif (!reference) throw new Error('A write needs a reference: your own id for it, stored by the API and searchable there');\nconst hex = () => Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');\nreturn [{ json: {\n  reference,\n  target: String(job.target ?? ''),\n  payload: JSON.stringify(job.payload ?? {}),\n  // token: this run. It tells my row from the row of a run that started at the same moment.\n  token: `${$execution.id}-${hex()}${hex()}`,\n} }];"
+      },
+      "id": "9e32d865-2446-4a5c-82d2-efea178f0a87",
+      "name": "Entry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "reference",
+              "condition": "eq",
+              "keyValue": "={{ $json.reference }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1,
+        "orderBy": true,
+        "orderByColumn": "id",
+        "orderByDirection": "ASC"
+      },
+      "id": "1b4e5cde-f76c-48d0-8fa1-1ec344895880",
+      "name": "Known reference",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "67c21ec8-ea8b-4867-8582-7a139c188347",
+              "leftValue": "={{ $json.id === undefined }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "bf563d93-631d-42ce-82df-f2a569ff2421",
+      "name": "New?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json;\nreturn [{ json: { reference: row.reference, status: row.status, attempt: row.attempt, remote_id: row.remote_id ?? '', resolution: row.resolution ?? '', duplicate_submit: true } }];"
+      },
+      "id": "8cb5ec7f-5d4a-4396-815c-1807e5dcbbe0",
+      "name": "Already known",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "reference": "={{ $('Entry').first().json.reference }}",
+            "target": "={{ $('Entry').first().json.target }}",
+            "payload": "={{ $('Entry').first().json.payload }}",
+            "status": "sending",
+            "attempt": 1,
+            "checks": 0,
+            "last_check_at": 0,
+            "sent_at": "={{ $now.toUTC().toISO() }}",
+            "history": "[]",
+            "claimed_by": "={{ $('Entry').first().json.token }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "reference",
+              "displayName": "reference",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "target",
+              "displayName": "target",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attempt",
+              "displayName": "attempt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "checks",
+              "displayName": "checks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sent_at",
+              "displayName": "sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "claimed_by",
+              "displayName": "claimed_by",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "2addf71e-d482-495e-813b-f0253589e95f",
+      "name": "Claim",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "reference",
+              "condition": "eq",
+              "keyValue": "={{ $('Entry').first().json.reference }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1,
+        "orderBy": true,
+        "orderByColumn": "id",
+        "orderByDirection": "ASC"
+      },
+      "id": "04e2f3d8-8340-4f6a-844b-2b516db7a099",
+      "name": "First row",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        -100
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ada7e421-d85e-4212-8fbb-529d030d0262",
+              "leftValue": "={{ $json.id === $('Claim').first().json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "d20302d6-e2a7-4b2f-8237-cafa1368179c",
+      "name": "Mine?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1340,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Claim').first().json.id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "dc66e302-15a8-46d8-8d1a-858815ba65b1",
+      "name": "Remove my row",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1560,
+        80
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $('First row').first().json;\nreturn [{ json: { reference: row.reference, status: row.status, attempt: row.attempt, remote_id: row.remote_id ?? '', resolution: row.resolution ?? '', duplicate_submit: true } }];"
+      },
+      "id": "ab0211a6-af52-4fe7-81d8-6a297cfef49a",
+      "name": "Lost the race",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://fixture:8080/' + $json.target + '/write?ref=' + encodeURIComponent($json.reference) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "4193c35d-7804-4a88-8965-d30d45e2acec",
+      "name": "Send the write",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        -200
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// What the answer to a write means. Adapt it to your API.\nfunction readWrite(answer) {\n  const code = answer.statusCode;\n  if (code === undefined) return { status: 'unknown', saw: 'no answer: ' + String(answer.error?.message ?? answer.error ?? 'connection lost').slice(0, 160) };\n  if (code >= 200 && code < 300) return { status: 'done', saw: String(code), remote_id: String(answer.body?.id ?? '') };\n  // The API answered and refused. 408 is a timeout said out loud, so it stays unknown.\n  if (code >= 400 && code < 500 && code !== 408) return { status: 'rejected', saw: String(code) };\n  return { status: 'unknown', saw: String(code) };\n}\n\nconst result = readWrite($input.first().json);\nconst now = new Date();\nreturn [{ json: {\n  status: result.status,\n  remote_id: result.remote_id ?? '',\n  resolution: result.status === 'done' ? 'acknowledged' : result.status === 'rejected' ? 'refused_' + result.saw : '',\n  first_seen_at: result.status === 'done' ? now.toISOString() : '',\n  // The recheck clock starts now.\n  last_check_at: now.getTime(),\n  history: JSON.stringify([{ at: now.toISOString(), step: 'write', attempt: 1, saw: result.saw }]),\n} }];"
+      },
+      "id": "12e2434e-eacc-482f-819a-0581caed0c0d",
+      "name": "Read the answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Claim').first().json.id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "remote_id": "={{ $json.remote_id }}",
+            "resolution": "={{ $json.resolution }}",
+            "first_seen_at": "={{ $json.first_seen_at }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "history": "={{ $json.history }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_check_at",
+              "displayName": "last_check_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "first_seen_at",
+              "displayName": "first_seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "remote_id",
+              "displayName": "remote_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolution",
+              "displayName": "resolution",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "history",
+              "displayName": "history",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "a941fc49-7b9f-4c01-8852-3a57bc497c64",
+      "name": "Save the outcome",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2000,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json;\nreturn [{ json: { reference: row.reference, status: row.status, attempt: row.attempt, remote_id: row.remote_id ?? '', resolution: row.resolution ?? '', duplicate_submit: false } }];"
+      },
+      "id": "138c75d2-a6df-4889-8180-7b4a7e325f6b",
+      "name": "Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "unknown-write/jobs",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "f97eddc3-795c-40da-8dc5-7e035f96fc91",
+      "name": "Jobs",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        480
+      ],
+      "webhookId": "bc954032-1c36-44f5-8f9e-db4e9cf61184",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "unknownWriteKey",
+          "name": "Unknown Write Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "write_jobs"
+        },
+        "matchType": "anyCondition",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "reference",
+              "condition": "eq",
+              "keyValue": "={{ $json.query.reference ?? '-' }}"
+            },
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "={{ $json.query.status ?? '-' }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "77b31440-5ff0-4779-8968-4463342e45a8",
+      "name": "Rows",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        480
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const parse = (text, fallback) => { try { return JSON.parse(text); } catch { return fallback; } };\nconst jobs = $input.all().map((item) => item.json).filter((row) => row.id !== undefined)\n  .map((row) => ({ ...row, payload: parse(row.payload, {}), history: parse(row.history, []) }));\nreturn [{ json: { jobs } }];"
+      },
+      "id": "aeaef583-30d6-4e17-8a8a-6399e8719841",
+      "name": "As a list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        480
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When called": {
+      "main": [
+        [
+          {
+            "node": "Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit": {
+      "main": [
+        [
+          {
+            "node": "Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Entry": {
+      "main": [
+        [
+          {
+            "node": "Known reference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Known reference": {
+      "main": [
+        [
+          {
+            "node": "New?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New?": {
+      "main": [
+        [
+          {
+            "node": "Claim",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Already known",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim": {
+      "main": [
+        [
+          {
+            "node": "First row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "First row": {
+      "main": [
+        [
+          {
+            "node": "Mine?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mine?": {
+      "main": [
+        [
+          {
+            "node": "Send the write",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Remove my row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove my row": {
+      "main": [
+        [
+          {
+            "node": "Lost the race",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the write": {
+      "main": [
+        [
+          {
+            "node": "Read the answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the answer": {
+      "main": [
+        [
+          {
+            "node": "Save the outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save the outcome": {
+      "main": [
+        [
+          {
+            "node": "Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jobs": {
+      "main": [
+        [
+          {
+            "node": "Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rows": {
+      "main": [
+        [
+          {
+            "node": "As a list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "unknownWriteSubmit"
+}

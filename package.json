@@ -1,0 +1,15 @@
+{
+  "name": "n8n-unknown-write-outcome",
+  "version": "1.0.0",
+  "private": true,
+  "description": "n8n workflows for a write that timed out on an API without idempotency keys: one write, bounded rechecks, review after the cutoff, late arrivals closed instead of duplicated",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test:e2e": "node scripts/e2e.mjs",
+    "test:e2e:postgres": "node scripts/e2e.mjs postgres"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

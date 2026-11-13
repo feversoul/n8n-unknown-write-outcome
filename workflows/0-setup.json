@@ -1,0 +1,164 @@
+{
+  "name": "Unknown Write · 0 Setup",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Unknown Write · Setup\nRun this once: open it and press **Execute workflow**. It creates the data table `write_jobs`, one row per write. Running it again changes nothing.\n\nThe webhook does the same for scripted installs (`POST unknown-write/setup`). You can delete it.",
+        "width": 560,
+        "height": 180,
+        "color": 4
+      },
+      "id": "3e850f51-4ca0-4693-83e6-b2a089e2057b",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "470a88e9-f1de-454f-8df7-56006e15222d",
+      "name": "Run once",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "unknown-write/setup",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "d77a8b0c-d4d4-4844-8607-648135e64896",
+      "name": "Or call",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        180
+      ],
+      "webhookId": "a44582d6-0a92-498b-84e9-0b25b4af516b",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "unknownWriteKey",
+          "name": "Unknown Write Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "write_jobs",
+        "columns": {
+          "column": [
+            {
+              "name": "reference",
+              "type": "string"
+            },
+            {
+              "name": "target",
+              "type": "string"
+            },
+            {
+              "name": "payload",
+              "type": "string"
+            },
+            {
+              "name": "status",
+              "type": "string"
+            },
+            {
+              "name": "attempt",
+              "type": "number"
+            },
+            {
+              "name": "checks",
+              "type": "number"
+            },
+            {
+              "name": "last_check_at",
+              "type": "number"
+            },
+            {
+              "name": "sent_at",
+              "type": "string"
+            },
+            {
+              "name": "first_seen_at",
+              "type": "string"
+            },
+            {
+              "name": "review_at",
+              "type": "string"
+            },
+            {
+              "name": "remote_id",
+              "type": "string"
+            },
+            {
+              "name": "resolution",
+              "type": "string"
+            },
+            {
+              "name": "history",
+              "type": "string"
+            },
+            {
+              "name": "claimed_by",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "id": "d2b22bd3-5e8b-4adc-8558-1550851eb70b",
+      "name": "Create the table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Run once": {
+      "main": [
+        [
+          {
+            "node": "Create the table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Or call": {
+      "main": [
+        [
+          {
+            "node": "Create the table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "unknownWriteSetup1"
+}
