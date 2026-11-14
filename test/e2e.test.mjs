@@ -60,9 +60,12 @@ const counts = async (target, reference) => (await fetch(`${FIXTURE}/${target}/r
 const alertsFor = async (reference) => (await (await fetch(`${FIXTURE}/alerts`)).json()).alerts.filter((alert) => alert.reference === reference);
 const steps = (row, step) => row.history.filter((entry) => entry.step === step);
 
+// While n8n starts, every path answers 200 with a "starting up" page.
+const answered = async (response) => response.status === 200 && !(await response.text()).startsWith('n8n is starting up');
+
 before(async () => {
   // bootstrap.sh has finished when the setup webhook answers.
-  await until(async () => (await fetch(`${BASE}/webhook/unknown-write/setup`, { method: 'POST', headers, body: '{}' })).status === 200, 240_000, 1000);
+  await until(async () => answered(await fetch(`${BASE}/webhook/unknown-write/setup`, { method: 'POST', headers, body: '{}' })), 240_000, 1000);
 });
 
 after(() => {

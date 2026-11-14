@@ -50,7 +50,7 @@ How a job ended is in `resolution`: `acknowledged` (the write got its 2xx), `con
 
 ## Add it to your n8n
 
-Data Tables are available on n8n Cloud. I did not test on Cloud itself.
+Data Tables are available on n8n Cloud. I did not test on Cloud itself. There, **2 Check** is one execution a minute once it is published, about 43,200 a month, which is more than the Starter plan (2,500 a month) or the Pro plan (10,000) includes (Cloud plan page, 2026-11-14). Open **Every minute** and set a longer interval; the rechecks are then that far apart.
 
 1. Create a **Header Auth** credential named `Unknown Write Key` (header `X-Workflow-Key`, any long random value). The webhooks use it.
 2. Import the three files in `workflows/` (Workflows > Import from File) and pick the credential on the webhook nodes.
